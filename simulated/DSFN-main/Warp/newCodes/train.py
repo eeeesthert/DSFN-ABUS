@@ -294,12 +294,12 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(SUMMARY_DIR, exist_ok=True)
 
 
-def _pair_losses(fixed_img, moved_img, fixed_heat, moved_heat, net):
+def _pair_losses(fixed_img, moved_img, fixed_heat, moved_heat, pair_valid, net):
     out = build_train_model(net, fixed_img, moved_img, fixed_heat, moved_heat)
 
     overlap_loss = cal_lp_loss(fixed_img, moved_img, out['output_H'], out['output_H_inv'], out['warp_mesh'], out['warp_mesh_mask'])
     nonoverlap_loss = 10 * inter_grid_loss(out['overlap'], out['mesh2']) + 10 * intra_grid_loss(out['mesh2'])
-    heat_loss = cal_nipple_heatmap_loss(fixed_heat, out['depth_warp2'], overlap_mask=out['warp_mesh_mask'][:, 0:1, ...])
+    heat_loss = cal_nipple_heatmap_loss(fixed_heat, out['depth_warp2'], overlap_mask=out['warp_mesh_mask'][:, 0:1, ...], pair_valid=pair_valid)
 
     return out, overlap_loss, nonoverlap_loss, heat_loss
 
@@ -344,17 +344,20 @@ def train(args):
     for epoch in range(start_epoch, args.max_epoch):
         net.train()
         for i, batch_value in enumerate(train_loader):
-            input1, input2, input3, heat1, heat2, heat3 = [x.float() for x in batch_value]
+            input1, input2, input3, heat1, heat2, heat3, valid1, valid2, valid3 = [x.float() for x in batch_value]
             if torch.cuda.is_available():
                 input1, input2, input3 = input1.cuda(), input2.cuda(), input3.cuda()
                 heat1, heat2, heat3 = heat1.cuda(), heat2.cuda(), heat3.cuda()
+                valid1, valid2, valid3 = valid1.cuda(), valid2.cuda(), valid3.cuda()
 
             optimizer.zero_grad()
 
             # pair 1: input1 -> input2 (input2 fixed)
-            out12, ov12, non12, h12 = _pair_losses(input2, input1, heat2, heat1, net)
+            pair12_valid = valid1 * valid2
+            out12, ov12, non12, h12 = _pair_losses(input2, input1, heat2, heat1, pair12_valid, net)
             # pair 2: input3 -> input2 (input2 fixed)
-            out32, ov32, non32, h32 = _pair_losses(input2, input3, heat2, heat3, net)
+            pair32_valid = valid3 * valid2
+            out32, ov32, non32, h32 = _pair_losses(input2, input3, heat2, heat3, pair32_valid, net)
 
             left_nonoverlap = torch.clamp(-torch.min(out12['mesh2'][..., 0]), min=0.0)
             right_nonoverlap = torch.clamp(torch.max(out32['mesh2'][..., 0]) - input2.size(-1), min=0.0)
@@ -395,5 +398,3 @@ if __name__ == "__main__":
     args.train_path = os.path.expanduser(args.train_path)
     print(args)
     train(args)
-
-
