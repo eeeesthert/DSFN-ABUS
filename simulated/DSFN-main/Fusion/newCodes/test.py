@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from network import build_model, Network, RepConvN
+from network import build_model, build_model_three, Network, RepConvN
 from dataset import TestDepthDataset
 
 
@@ -70,42 +70,77 @@ def test(args):
 
     for i, batch_value in enumerate(test_loader):
 
-        warp1_tensor, warp2_tensor, mask1_tensor, mask2_tensor, depth1_tensor, depth2_tensor = batch_value
+        # warp1_tensor, warp2_tensor, mask1_tensor, mask2_tensor, depth1_tensor, depth2_tensor = batch_value
 
-        warp1_tensor = warp1_tensor.float()
-        warp2_tensor = warp2_tensor.float()
-        mask1_tensor = mask1_tensor.float()
-        mask2_tensor = mask2_tensor.float()
-        depth1_tensor = depth1_tensor.float()
-        depth2_tensor = depth2_tensor.float()
+        # warp1_tensor = warp1_tensor.float()
+        # warp2_tensor = warp2_tensor.float()
+        # mask1_tensor = mask1_tensor.float()
+        # mask2_tensor = mask2_tensor.float()
+        # depth1_tensor = depth1_tensor.float()
+        # depth2_tensor = depth2_tensor.float()
 
-        if torch.cuda.is_available():
-            warp1_tensor = warp1_tensor.cuda()
-            warp2_tensor = warp2_tensor.cuda()
-            mask1_tensor = mask1_tensor.cuda()
-            mask2_tensor = mask2_tensor.cuda()
-            depth1_tensor = depth1_tensor.cuda()
-            depth2_tensor = depth2_tensor.cuda()
+        # if torch.cuda.is_available():
+        #     warp1_tensor = warp1_tensor.cuda()
+        #     warp2_tensor = warp2_tensor.cuda()
+        #     mask1_tensor = mask1_tensor.cuda()
+        #     mask2_tensor = mask2_tensor.cuda()
+        #     depth1_tensor = depth1_tensor.cuda()
+        #     depth2_tensor = depth2_tensor.cuda()
 
-        with torch.no_grad():
+        # with torch.no_grad():
           
-            batch_out = build_model(net, warp1_tensor, warp2_tensor, mask1_tensor, mask2_tensor)
+        #     batch_out = build_model(net, warp1_tensor, warp2_tensor, mask1_tensor, mask2_tensor)
+        is_three = len(batch_value) == 9
+        if is_three:
+            warpf_tensor, warp1_tensor, warp3_tensor, maskf_tensor, mask1_tensor, mask3_tensor, depthf_tensor, depth1_tensor, depth3_tensor = batch_value
+            tensors = [warpf_tensor, warp1_tensor, warp3_tensor, maskf_tensor, mask1_tensor, mask3_tensor, depthf_tensor, depth1_tensor, depth3_tensor]
+            warpf_tensor, warp1_tensor, warp3_tensor, maskf_tensor, mask1_tensor, mask3_tensor, depthf_tensor, depth1_tensor, depth3_tensor = [t.float() for t in tensors]
+            if torch.cuda.is_available():
+                warpf_tensor, warp1_tensor, warp3_tensor = warpf_tensor.cuda(), warp1_tensor.cuda(), warp3_tensor.cuda()
+                maskf_tensor, mask1_tensor, mask3_tensor = maskf_tensor.cuda(), mask1_tensor.cuda(), mask3_tensor.cuda()
+                depthf_tensor, depth1_tensor, depth3_tensor = depthf_tensor.cuda(), depth1_tensor.cuda(), depth3_tensor.cuda()
+            with torch.no_grad():
+                batch_out = build_model_three(net, warpf_tensor, warp1_tensor, warp3_tensor, maskf_tensor, mask1_tensor, mask3_tensor)
+        else:
+            warp1_tensor, warp2_tensor, mask1_tensor, mask2_tensor, depth1_tensor, depth2_tensor = [t.float() for t in batch_value]
+            if torch.cuda.is_available():
+                warp1_tensor = warp1_tensor.cuda()
+                warp2_tensor = warp2_tensor.cuda()
+                mask1_tensor = mask1_tensor.cuda()
+                mask2_tensor = mask2_tensor.cuda()
+                depth1_tensor = depth1_tensor.cuda()
+                depth2_tensor = depth2_tensor.cuda()
+            with torch.no_grad():
+                batch_out = build_model(net, warp1_tensor, warp2_tensor, mask1_tensor, mask2_tensor)
+
 
         if i == 0:
             print("batch_out keys:", batch_out.keys())
 
       
-        stitched_image = batch_out['stitched_image']   
-        learned_mask1 = batch_out['learned_mask1']    
-        learned_mask2 = batch_out['learned_mask2']
+        # stitched_image = batch_out['stitched_image']   
+        # learned_mask1 = batch_out['learned_mask1']    
+        # learned_mask2 = batch_out['learned_mask2']
+        stitched_image = batch_out['stitched_image']
+        if is_three:
+            learned_mask_fixed = batch_out['learned_mask_fixed']
+            learned_mask1 = batch_out['learned_mask1']
+            learned_mask3 = batch_out['learned_mask3']
+            fused_nodule = depthf_tensor * learned_mask_fixed + depth1_tensor * learned_mask1 + depth3_tensor * learned_mask3
+            learned_mask2 = learned_mask3
+        else:
+            learned_mask1 = batch_out['learned_mask1']
+            learned_mask2 = batch_out['learned_mask2']
+            fused_nodule = depth1_tensor * learned_mask1 + depth2_tensor * learned_mask2
 
    
         if learned_mask1.shape[1] > 1:
             learned_mask1 = learned_mask1[:, :1, ...]
+        if learned_mask2.shape[1] > 1:
             learned_mask2 = learned_mask2[:, :1, ...]
 
 
-        fused_nodule = depth1_tensor * learned_mask1 + depth2_tensor * learned_mask2
+        # fused_nodule = depth1_tensor * learned_mask1 + depth2_tensor * learned_mask2
         fused_nodule_bin = (fused_nodule > 0.5).float()
 
         stitched_np = ((stitched_image[0] + 1) * 127.5).clamp(0, 255).cpu().numpy().transpose(1, 2, 0)
