@@ -252,24 +252,31 @@ def soft_argmax_2d(heatmap):
     exp_y = (prob * ys).sum(dim=(2, 3))
     return torch.cat([exp_x, exp_y], dim=1)
     
-def cal_nipple_heatmap_loss(target_heatmap, warped_heatmap, overlap_mask=None, coord_weight=0.2):
+def cal_nipple_heatmap_loss(target_heatmap, warped_heatmap, overlap_mask=None, coord_weight=0.2, pair_valid=None):
     target_heatmap: [B,1,H,W], fixed-view nipple heatmap
     warped_heatmap: [B,1,H,W], moved-view heatmap warped to fixed view
     overlap_mask: optional [B,1,H,W]
     target_heatmap = target_heatmap.float().clamp(0.0, 1.0)
     warped_heatmap = warped_heatmap.float().clamp(0.0, 1.0)
-
     if overlap_mask is not None:
         if overlap_mask.shape[-2:] != target_heatmap.shape[-2:]:
             overlap_mask = F.interpolate(overlap_mask.float(), size=target_heatmap.shape[-2:], mode='nearest')
         valid = (overlap_mask > 0.5).float()
-        denom = valid.sum().clamp_min(1.0)
-        mse = ((target_heatmap - warped_heatmap) ** 2 * valid).sum() / denom
     else:
-        mse = F.mse_loss(target_heatmap, warped_heatmap)
+        valid = torch.ones_like(target_heatmap)
+    if pair_valid is not None:
+        pair_valid = pair_valid.view(-1, 1, 1, 1).to(valid.device).float()
+        valid = valid * pair_valid
+    denom = valid.sum().clamp_min(1.0)
+    mse = ((target_heatmap - warped_heatmap) ** 2 * valid).sum() / denom
     target_coord = soft_argmax_2d(target_heatmap)
     warped_coord = soft_argmax_2d(warped_heatmap)
-    coord_loss = F.smooth_l1_loss(warped_coord, target_coord)
+    coord_each = F.smooth_l1_loss(warped_coord, target_coord, reduction='none').mean(dim=1)
+    if pair_valid is not None:
+        pv = pair_valid.view(-1).to(coord_each.device).float()
+        coord_loss = (coord_each * pv).sum() / pv.sum().clamp_min(1.0)
+    else:
+        coord_loss = coord_each.mean()
     return mse + coord_weight * coord_loss
 def cal_depth_loss(depth1, depth2, output_H, output_H_inv, warp_mesh, warp_mesh_mask):
     """Backward-compatible alias: now used as nipple heatmap supervision."""
