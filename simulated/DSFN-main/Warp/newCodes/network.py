@@ -553,6 +553,96 @@ def build_output_model(net, input1_tensor, input2_tensor):
     return out_dict
 
 
+def _predict_mesh_to_fixed(net, fixed_tensor, moved_tensor):
+    batch_size, _, img_h, img_w = fixed_tensor.size()
+
+    resized_fixed = resize_512(fixed_tensor)
+    resized_moved = resize_512(moved_tensor)
+    H_motion, mesh_motion = net(resized_fixed, resized_moved)
+
+    H_motion = H_motion.reshape(-1, 4, 2)
+    H_motion = torch.stack([H_motion[..., 0] * img_w / 512, H_motion[..., 1] * img_h / 512], 2)
+    mesh_motion = mesh_motion.reshape(-1, grid_h + 1, grid_w + 1, 2)
+    mesh_motion = torch.stack([mesh_motion[..., 0] * img_w / 512, mesh_motion[..., 1] * img_h / 512], 3)
+
+    src_p = torch.tensor([[0., 0.], [img_w, 0.], [0., img_h], [img_w, img_h]], device=fixed_tensor.device)
+    src_p = src_p.unsqueeze(0).expand(batch_size, -1, -1)
+    dst_p = src_p + H_motion
+    H = torch_DLT.tensor_DLT(src_p, dst_p)
+
+    rigid_mesh = get_rigid_mesh(batch_size, img_h, img_w)
+    ini_mesh = H2Mesh(H, rigid_mesh)
+    mesh = ini_mesh + mesh_motion
+    return rigid_mesh, mesh
+
+
+def build_output_model_three(net, input1_tensor, input2_tensor, input3_tensor, alpha=1.0):
+    """Three-view stitching: input2 fixed; input1/input3 moved to input2."""
+    alpha = float(max(0.0, min(1.0, alpha)))
+    batch_size, _, img_h, img_w = input2_tensor.size()
+    device = input2_tensor.device
+
+    rigid_mesh, mesh12 = _predict_mesh_to_fixed(net, input2_tensor, input1_tensor)
+    _, mesh32 = _predict_mesh_to_fixed(net, input2_tensor, input3_tensor)
+
+    min_x12 = torch.min(mesh12[..., 0])
+    max_x32 = torch.max(mesh32[..., 0])
+    left_nonoverlap = torch.clamp(-min_x12, min=0.0)
+    right_nonoverlap = torch.clamp(max_x32 - img_w, min=0.0)
+    right_limit = alpha * left_nonoverlap
+
+    shift = torch.clamp(right_nonoverlap - right_limit, min=0.0)
+    mesh32 = torch.stack([mesh32[..., 0] - shift, mesh32[..., 1]], dim=3)
+
+    width_max = torch.max(torch.stack([mesh12[..., 0].max(), mesh32[..., 0].max(), torch.tensor(float(img_w), device=device)]))
+    width_min = torch.min(torch.stack([mesh12[..., 0].min(), mesh32[..., 0].min(), torch.tensor(0.0, device=device)]))
+    height_max = torch.max(torch.stack([mesh12[..., 1].max(), mesh32[..., 1].max(), torch.tensor(float(img_h), device=device)]))
+    height_min = torch.min(torch.stack([mesh12[..., 1].min(), mesh32[..., 1].min(), torch.tensor(0.0, device=device)]))
+
+    out_width = (width_max - width_min).int()
+    out_height = (height_max - height_min).int()
+
+    M_tensor = torch.tensor([[out_width / 2.0, 0., out_width / 2.0],
+                             [0., out_height / 2.0, out_height / 2.0],
+                             [0., 0., 1.]], device=device)
+    N_tensor = torch.tensor([[img_w / 2.0, 0., img_w / 2.0],
+                             [0., img_h / 2.0, img_h / 2.0],
+                             [0., 0., 1.]], device=device)
+    N_tensor_inv = torch.inverse(N_tensor)
+
+    I_ = torch.tensor([[1., 0., width_min],
+                       [0., 1., height_min],
+                       [0., 0., 1.]], device=device)
+    I_mat = torch.matmul(torch.matmul(N_tensor_inv, I_), M_tensor).unsqueeze(0)
+
+    mask = torch.ones_like(input2_tensor)
+    fixed_out = torch_homo_transform.transformer(torch.cat((input2_tensor + 1, mask), 1), I_mat, (out_height, out_width))
+
+    mesh12_trans = torch.stack([mesh12[..., 0] - width_min, mesh12[..., 1] - height_min], 3)
+    mesh32_trans = torch.stack([mesh32[..., 0] - width_min, mesh32[..., 1] - height_min], 3)
+
+    norm_rigid_mesh = get_norm_mesh(rigid_mesh, img_h, img_w)
+    norm_mesh12 = get_norm_mesh(mesh12_trans, out_height, out_width)
+    norm_mesh32 = get_norm_mesh(mesh32_trans, out_height, out_width)
+
+    moved1_out = torch_tps_transform.transformer(torch.cat([input1_tensor + 1, mask], 1), norm_mesh12, norm_rigid_mesh, (out_height, out_width))
+    moved3_out = torch_tps_transform.transformer(torch.cat([input3_tensor + 1, mask], 1), norm_mesh32, norm_rigid_mesh, (out_height, out_width))
+
+    return {
+        'final_warp_fixed': fixed_out[:, 0:3, ...] - 1,
+        'final_warp_fixed_mask': fixed_out[:, 3:6, ...],
+        'final_warp1': moved1_out[:, 0:3, ...] - 1,
+        'final_warp1_mask': moved1_out[:, 3:6, ...],
+        'final_warp3': moved3_out[:, 0:3, ...] - 1,
+        'final_warp3_mask': moved3_out[:, 3:6, ...],
+        'mesh12': mesh12_trans,
+        'mesh32': mesh32_trans,
+        'left_nonoverlap': left_nonoverlap,
+        'right_nonoverlap': right_nonoverlap,
+        'right_limit': right_limit,
+    }
+
+
 class RepConvN(nn.Module):
     default_act = nn.ReLU(inplace=True)  # default activation
 
