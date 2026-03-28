@@ -48,6 +48,33 @@ def build_depth_output_model(net, warp1_tensor, warp2_tensor, mask1_tensor, mask
 
 
 
+def build_model_three(net, warp_fixed, warp1, warp3, mask_fixed, mask1, mask3):
+    """Three-input fusion by cascading existing two-input fusion network."""
+    # stage-1: fuse fixed + moved1
+    out12 = build_model(net, warp_fixed, warp1, mask_fixed, mask1)
+    stitched12 = out12['stitched_image']
+    learned_fixed_12 = out12['learned_mask1']
+    learned_1_12 = out12['learned_mask2']
+
+    # stage-2: fuse (fixed+1) with moved3
+    mask12 = torch.clamp(learned_fixed_12 + learned_1_12, 0.0, 1.0)
+    out123 = build_model(net, stitched12, warp3, mask12, mask3)
+
+    gate12 = out123['learned_mask1']
+    learned_3 = out123['learned_mask2']
+    learned_fixed = learned_fixed_12 * gate12
+    learned_1 = learned_1_12 * gate12
+
+    stitched = (warp_fixed + 1.0) * learned_fixed + (warp1 + 1.0) * learned_1 + (warp3 + 1.0) * learned_3 - 1.0
+
+    return {
+        'stitched_image': stitched,
+        'learned_mask_fixed': learned_fixed,
+        'learned_mask1': learned_1,
+        'learned_mask3': learned_3,
+    }
+
+
 
 class DownBlock(nn.Module):
     def __init__(self, inchannels, outchannels, dilation, pool=True):
